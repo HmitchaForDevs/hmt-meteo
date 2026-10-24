@@ -20,24 +20,39 @@ import android.os.Process
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
  * Floating weather widget. Shown only while the launcher (home screen) is in the
  * foreground, detected with UsageStatsManager (requires "Usage access").
- * Without usage access it stays visible everywhere (fallback).
+ * Without usage access it stays visible everywhere (documented fallback).
+ *
+ * Layout (detailed card, like a home-screen weather widget):
+ *   City name                         date
+ *   [big icon] 29°   description
+ *                    feels like / min / max
+ *   ---- hourly strip: next 6 hours (time, icon, temp) ----
+ * Gestures: tap = open app, double tap = hide, long press = drag.
  */
 class OverlayService : Service() {
     private lateinit var wm: WindowManager
     private lateinit var root: LinearLayout
     private lateinit var params: WindowManager.LayoutParams
+    private lateinit var tCity: TextView
+    private lateinit var tDate: TextView
     private lateinit var tIcon: TextView
     private lateinit var tTemp: TextView
     private lateinit var tDesc: TextView
-    private lateinit var tCity: TextView
+    private lateinit var tSub: TextView
+    private lateinit var tBrand: TextView
+    private lateinit var hourlyRow: LinearLayout
     private val h = Handler(Looper.getMainLooper())
     private var attached = false
     private var dragMode = false
@@ -72,7 +87,7 @@ class OverlayService : Service() {
 
     private fun notification(): Notification {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel("w", "HMT METEO widget", NotificationManager.IMPORTANCE_MIN))
+        nm.createNotificationChannel(NotificationChannel("t", "HMT METEO widget", NotificationManager.IMPORTANCE_MIN))
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, "w").setContentTitle("HMT METEO")
             .setContentText("Weather widget active").setSmallIcon(android.R.drawable.ic_menu_compass)
@@ -86,28 +101,55 @@ class OverlayService : Service() {
     }
 
     private fun bg(drag: Boolean) = GradientDrawable().apply {
-        cornerRadius = dp(20).toFloat()
-        colors = intArrayOf(Color.parseColor("#E6141418"), Color.parseColor("#E62A0A0A"))
+        cornerRadius = dp(22).toFloat()
+        colors = intArrayOf(Color.parseColor("#F0141418"), Color.parseColor("#F02A0A0A"))
         orientation = GradientDrawable.Orientation.TL_BR
         setStroke(dp(if (drag) 3 else 1), if (drag) Color.parseColor("#E10600") else Color.parseColor("#55E10600"))
     }
 
     private fun buildView() {
         root = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(10), dp(20), dp(10))
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(14), dp(20), dp(14))
             background = bg(false)
             elevation = dp(8).toFloat()
         }
-        tIcon = tv(34f, Color.WHITE)
-        tTemp = tv(34f, Color.WHITE, true).apply { setPadding(dp(10), 0, dp(14), 0) }
+
+        // Header: city left, date right
+        val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        tCity = tv(17f, Color.WHITE, true)
+        tDate = tv(13f, Color.parseColor("#AAAAAA"))
+        header.addView(tCity, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(tDate)
+        root.addView(header)
+
+        // Main row: big icon + big temp | description + details
+        val main = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(6))
+        }
+        tIcon = tv(56f, Color.WHITE)
+        tTemp = tv(56f, Color.WHITE, true).apply { setPadding(dp(8), 0, dp(18), 0) }
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        tDesc = tv(14f, Color.parseColor("#DDDDDD"))
-        tCity = tv(13f, Color.parseColor("#999999"))
-        val brand = tv(9f, Color.parseColor("#E10600"), true).apply { text = "HMT METEO" }
-        col.addView(tDesc); col.addView(tCity); col.addView(brand)
-        root.addView(tIcon); root.addView(tTemp); root.addView(col)
+        tDesc = tv(17f, Color.WHITE, true)
+        tSub = tv(13f, Color.parseColor("#CCCCCC"))
+        col.addView(tDesc); col.addView(tSub)
+        main.addView(tIcon); main.addView(tTemp); main.addView(col)
+        root.addView(main)
+
+        // Divider
+        root.addView(View(this).apply {
+            setBackgroundColor(Color.parseColor("#33E10600"))
+        }, LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(2); bottomMargin = dp(8) })
+
+        // Hourly strip
+        hourlyRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(hourlyRow)
+
+        tBrand = tv(9f, Color.parseColor("#E10600"), true).apply {
+            text = "HMT METEO"; setPadding(0, dp(6), 0, 0)
+        }
+        root.addView(tBrand)
 
         val p = Weather.prefs(this)
         params = WindowManager.LayoutParams(
@@ -117,7 +159,7 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = p.getInt("wx", dp(40)); y = p.getInt("wy", dp(40))
+            x = p.getInt("wx", dp(24)); y = p.getInt("wy", dp(24))
         }
 
         val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
@@ -170,15 +212,49 @@ class OverlayService : Service() {
         val json = Weather.cached(this)
         val cur = json?.optJSONObject("current")
         if (cur == null) {
-            tIcon.text = "☁"; tTemp.text = "--°"; tDesc.text = "No data yet"; tCity.text = "Open HMT METEO"
+            tCity.text = "HMT METEO"; tDate.text = ""
+            tIcon.text = "☁"; tTemp.text = "--°"
+            tDesc.text = "No data yet"; tSub.text = "Open HMT METEO"
+            hourlyRow.removeAllViews()
             return
         }
+        val p = Weather.prefs(this)
         val code = cur.optInt("weather_code")
-        tIcon.text = Weather.icon(code, cur.optInt("is_day", 1) == 1)
+        val day = cur.optInt("is_day", 1) == 1
+        tCity.text = p.getString("name", "") ?: ""
+        tDate.text = SimpleDateFormat("EEE dd MMM  HH:mm", Locale.getDefault()).format(Date())
+        tIcon.text = Weather.icon(code, day)
         tTemp.text = "${cur.optDouble("temperature_2m").roundToInt()}°"
-        val stale = System.currentTimeMillis() - Weather.prefs(this).getLong("updated", 0) > Weather.STALE_MS
+        val stale = System.currentTimeMillis() - p.getLong("updated", 0) > Weather.STALE_MS
         tDesc.text = Weather.describe(code) + if (stale) "  • offline" else ""
-        tCity.text = Weather.prefs(this).getString("name", "") ?: ""
+        val daily = json.optJSONObject("daily")
+        val feels = cur.optDouble("apparent_temperature").roundToInt()
+        val min = daily?.optJSONArray("temperature_2m_min")?.optDouble(0)?.roundToInt()
+        val max = daily?.optJSONArray("temperature_2m_max")?.optDouble(0)?.roundToInt()
+        tSub.text = "Feels $feels°" + (if (min != null && max != null) "   ↓$min°  ↑$max°" else "")
+
+        // Hourly strip: next 6 hours
+        hourlyRow.removeAllViews()
+        val hr = json.optJSONObject("hourly")
+        if (hr != null) {
+            val times = hr.getJSONArray("time")
+            val now = cur.optString("time").take(13)
+            val start = (0 until times.length()).firstOrNull { times.getString(it).take(13) >= now } ?: 0
+            for (i in start until minOf(start + 6, times.length())) {
+                val item = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.CENTER_HORIZONTAL
+                    setPadding(dp(4), 0, dp(4), 0)
+                }
+                item.addView(tv(11f, Color.parseColor("#AAAAAA")).apply { text = times.getString(i).substringAfter("T") })
+                item.addView(tv(20f, Color.WHITE).apply { text = Weather.icon(hr.getJSONArray("weather_code").optInt(i), day) })
+                item.addView(tv(14f, Color.WHITE, true).apply { text = "${hr.getJSONArray("temperature_2m").optDouble(i).roundToInt()}°" })
+                val pp = hr.optJSONArray("precipitation_probability")
+                if (pp != null && !pp.isNull(i) && pp.optInt(i) > 0)
+                    item.addView(tv(10f, Color.parseColor("#7AB8FF")).apply { text = "${pp.optInt(i)}%" })
+                hourlyRow.addView(item, LinearLayout.LayoutParams(0, -2, 1f))
+            }
+        }
     }
 
     private val autoRefresh = object : Runnable {
