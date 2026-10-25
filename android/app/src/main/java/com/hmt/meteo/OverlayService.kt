@@ -87,9 +87,9 @@ class OverlayService : Service() {
 
     private fun notification(): Notification {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel("t", "HMT METEO widget", NotificationManager.IMPORTANCE_MIN))
+        nm.createNotificationChannel(NotificationChannel(NOTIFICATION_CHANNEL_ID, "HMT METEO widget", NotificationManager.IMPORTANCE_MIN))
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        return Notification.Builder(this, "w").setContentTitle("HMT METEO")
+        return Notification.Builder(this, NOTIFICATION_CHANNEL_ID).setContentTitle("HMT METEO")
             .setContentText("Weather widget active").setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pi).build()
     }
@@ -304,6 +304,7 @@ class OverlayService : Service() {
     }
 
     companion object {
+        private const val NOTIFICATION_CHANNEL_ID = "w"
         const val ACTION_UPDATE = "com.hmt.meteo.UPDATE"
 
         fun launcherPackages(ctx: Context): Set<String> {
