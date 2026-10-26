@@ -30,16 +30,8 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
- * Floating weather widget. Shown only while the launcher (home screen) is in the
- * foreground, detected with UsageStatsManager (requires "Usage access").
- * Without usage access it stays visible everywhere (documented fallback).
- *
- * Layout (detailed card, like a home-screen weather widget):
- *   City name                         date
- *   [big icon] 29°   description
- *                    feels like / min / max
- *   ---- hourly strip: next 6 hours (time, icon, temp) ----
- * Gestures: tap = open app, double tap = hide, long press = drag.
+ * Floating weather widget, shown only on the home screen (UsageStatsManager).
+ * Gestures: tap = open app, double tap = collapse to small icon (tap icon to restore), long press = drag.
  */
 class OverlayService : Service() {
     private lateinit var wm: WindowManager
@@ -55,6 +47,9 @@ class OverlayService : Service() {
     private lateinit var hourlyRow: LinearLayout
     private val h = Handler(Looper.getMainLooper())
     private var attached = false
+    private var collapsed = false
+    private lateinit var bubble: TextView
+    private lateinit var bubbleParams: WindowManager.LayoutParams
     private var dragMode = false
     private var homePkgs = setOf<String>()
     private var foreground: String? = null
@@ -67,7 +62,9 @@ class OverlayService : Service() {
         startForeground(1, notification())
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
         homePkgs = launcherPackages(this)
+        collapsed = Weather.prefs(this).getBoolean("collapsed", false)
         buildView()
+        buildBubble()
         render()
         h.post(poll)
         h.postDelayed(autoRefresh, 5000)
@@ -80,7 +77,7 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         h.removeCallbacksAndMessages(null)
-        if (attached) runCatching { wm.removeView(root) }
+        if (attached) runCatching { wm.removeView(current()) }
         attached = false
         super.onDestroy()
     }
@@ -115,7 +112,6 @@ class OverlayService : Service() {
             elevation = dp(8).toFloat()
         }
 
-        // Header: city left, date right
         val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         tCity = tv(17f, Color.WHITE, true)
         tDate = tv(13f, Color.parseColor("#AAAAAA"))
@@ -123,7 +119,6 @@ class OverlayService : Service() {
         header.addView(tDate)
         root.addView(header)
 
-        // Main row: big icon + big temp | description + details
         val main = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(4), 0, dp(6))
@@ -137,12 +132,10 @@ class OverlayService : Service() {
         main.addView(tIcon); main.addView(tTemp); main.addView(col)
         root.addView(main)
 
-        // Divider
         root.addView(View(this).apply {
             setBackgroundColor(Color.parseColor("#33E10600"))
         }, LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(2); bottomMargin = dp(8) })
 
-        // Hourly strip
         hourlyRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         root.addView(hourlyRow)
 
@@ -170,10 +163,7 @@ class OverlayService : Service() {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
                 return true
             }
-            override fun onDoubleTap(e: MotionEvent): Boolean {
-                Weather.prefs(this@OverlayService).edit().putBoolean("widget_on", false).apply()
-                stopSelf(); return true
-            }
+            override fun onDoubleTap(e: MotionEvent): Boolean { setCollapsed(true); return true }
             override fun onLongPress(e: MotionEvent) { setDrag(true) }
         })
 
@@ -189,6 +179,7 @@ class OverlayService : Service() {
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         Weather.prefs(this).edit().putInt("wx", params.x).putInt("wy", params.y).apply()
+                        bubbleParams.x = params.x; bubbleParams.y = params.y
                         rx = 0f; ry = 0f
                         h.postDelayed(dragTimeout, 1500)
                     }
@@ -216,8 +207,11 @@ class OverlayService : Service() {
             tIcon.text = "☁"; tTemp.text = "--°"
             tDesc.text = "No data yet"; tSub.text = "Open HMT METEO"
             hourlyRow.removeAllViews()
+            bubble.text = "☁"
             return
         }
+        bubble.text = Weather.icon(cur.optInt("weather_code"), cur.optInt("is_day", 1) == 1) +
+            " ${cur.optDouble("temperature_2m").roundToInt()}°"
         val p = Weather.prefs(this)
         val code = cur.optInt("weather_code")
         val day = cur.optInt("is_day", 1) == 1
@@ -233,7 +227,6 @@ class OverlayService : Service() {
         val max = daily?.optJSONArray("temperature_2m_max")?.optDouble(0)?.roundToInt()
         tSub.text = "Feels $feels°" + (if (min != null && max != null) "   ↓$min°  ↑$max°" else "")
 
-        // Hourly strip: next 6 hours
         hourlyRow.removeAllViews()
         val hr = json.optJSONObject("hourly")
         if (hr != null) {
@@ -298,9 +291,40 @@ class OverlayService : Service() {
         }
     }
 
+    private fun current(): View = if (collapsed) bubble else root
+
     private fun setVisible(show: Boolean) {
-        if (show && !attached) { runCatching { wm.addView(root, params); attached = true; render() } }
-        else if (!show && attached) { runCatching { wm.removeView(root) }; attached = false }
+        if (show && !attached) { runCatching { wm.addView(current(), if (collapsed) bubbleParams else params); attached = true; render() } }
+        else if (!show && attached) { runCatching { wm.removeView(current()) }; attached = false }
+    }
+
+    private fun setCollapsed(c: Boolean) {
+        if (c == collapsed) return
+        val was = attached
+        if (attached) { runCatching { wm.removeView(current()) }; attached = false }
+        collapsed = c
+        Weather.prefs(this).edit().putBoolean("collapsed", c).apply()
+        if (was) setVisible(true)
+    }
+
+    private fun buildBubble() {
+        bubble = tv(18f, Color.WHITE, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(30).toFloat()
+                setColor(Color.parseColor("#F0141418"))
+                setStroke(dp(2), Color.parseColor("#E10600"))
+            }
+            elevation = dp(6).toFloat()
+            setOnClickListener { setCollapsed(false) }
+        }
+        bubbleParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = params.x; y = params.y }
     }
 
     companion object {
